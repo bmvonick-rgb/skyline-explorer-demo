@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Landmark Finder</title>
+<!-- Experiment (throwaway): GPS + compass + camera → label real landmarks.
+     Skyline mode = "what is that out there?"  Find mode = "which way is ___?" -->
+<style>
+  :root { --bg: #0e1420; --panel: rgba(14,20,32,.78); --ink: #eef2f8; --muted: #9aa7bd;
+    --accent: #ffb547; --good: #4cd68a; --line: #33405a; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #stage { position: fixed; inset: 0; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    display: flex; flex-direction: column; }
+  .panel { background: var(--panel); border-radius: 14px; padding: 10px 14px; backdrop-filter: blur(8px); }
+  .top { margin-top: 12px; display: grid; gap: 8px; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .modes button { font: inherit; font-weight: 600; padding: 8px; border-radius: 10px;
+    border: 1px solid var(--line); background: #1c2536; color: var(--muted); }
+  .modes button.on { background: var(--accent); color: #1b1200; border-color: var(--accent); }
+  select { width: 100%; font: inherit; font-weight: 600; padding: 8px; border-radius: 10px;
+    background: #1c2536; color: var(--ink); border: 1px solid var(--line); }
+  .facts { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 14px; }
+  .facts b { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .middle { flex: 1; position: relative; }
+  #arrow { position: absolute; left: 50%; top: 50%; width: 120px; height: 120px; margin: -60px 0 0 -60px;
+    transition: transform .15s linear; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+  .tag { position: absolute; transform: translateX(-50%); white-space: nowrap; text-align: center;
+    background: var(--panel); border: 2px solid var(--accent); border-radius: 12px; padding: 4px 10px;
+    font-weight: 600; font-size: 14px; backdrop-filter: blur(6px); }
+  .tag small { display: block; font-weight: 500; color: var(--muted); font-size: 12px; }
+  .tag.locked { border-color: var(--good); }
+  /* The stem marks the landmark's true direction; the box may slide to stay on screen. */
+  .stem { position: absolute; width: 2px; margin-left: -1px; background: var(--accent); opacity: .7; }
+  .stem.locked { background: var(--good); }
+  #centerline { position: fixed; left: 50%; top: 30%; bottom: 30%; width: 0;
+    border-left: 1px dashed rgba(255,255,255,.35); pointer-events: none; }
+  #hint { position: absolute; left: 0; right: 0; bottom: 18px; text-align: center; font-weight: 600;
+    text-shadow: 0 1px 4px #000; }
+  .bottom { margin-bottom: 12px; font-size: 13px; color: var(--muted); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .bottom button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: #1c2536; color: var(--ink); }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 14px; padding: 24px; text-align: center; background: var(--bg); z-index: 5; }
+  #start h1 { margin: 0; font-size: 30px; }
+  #start p { margin: 0; color: var(--muted); max-width: 320px; }
+  #go { font: inherit; font-size: 18px; font-weight: 700; padding: 14px 28px; border: 0; border-radius: 999px;
+    background: var(--accent); color: #1b1200; }
+  #err { color: #ff8a8a; max-width: 320px; }
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+<div id="centerline"></div>
+<div id="labels"></div>
+
+<div id="start">
+  <h1>Landmark Finder</h1>
+  <p>Hold your phone upright like you're taking a photo and pan across the skyline.</p>
+  <p>Your location stays on this phone. Nothing is sent anywhere.</p>
+  <button id="go">Start</button>
+  <div id="err"></div>
+</div>
+
+<div id="stage">
+  <div class="top panel">
+    <div class="modes">
+      <button id="mSky" class="on">What's that?</button>
+      <button id="mFind">Find a place</button>
+    </div>
+    <select id="pick" hidden></select>
+    <div class="facts">
+      <span id="f1">In view <b id="count">–</b></span>
+      <span>Phone facing <b id="head">–</b></span>
+    </div>
+  </div>
+
+  <div class="middle">
+    <svg id="arrow" hidden viewBox="0 0 100 100"><path d="M50 6 L80 80 L50 64 L20 80 Z" fill="#ffb547" stroke="#000" stroke-opacity=".4" stroke-width="2"/></svg>
+    <div id="hint">Getting your location…</div>
+  </div>
+
+  <div class="bottom panel">
+    <div class="row">
+      <span>GPS ±<b id="gps">–</b> m · Compass ±<b id="cacc">–</b>° · View <b id="fov">–</b>°</span>
+      <span>
+        <button id="minus">−1°</button>
+        <b id="off">0°</b>
+        <button id="plus">+1°</button>
+      </span>
+    </div>
+    <div style="margin-top:4px">Nudge shifts every label if they're all off by the same amount.</div>
+  </div>
+</div>
+
+<script>
+// Coordinates from each landmark's Wikipedia article (WGS84, approximate).
+const LANDMARKS = [
+  // Austin: checked against Wikipedia infoboxes on 2026-11-01
+  ["Texas State Capitol", "Austin", 30.2747, -97.7406],
+  ["UT Tower", "Austin", 30.2861, -97.7393],
+  ["Frost Bank Tower", "Austin", 30.2665, -97.7427],
+  ["The Austonian", "Austin", 30.2648, -97.7445],
+  ["Sixth and Guadalupe", "Austin", 30.2693, -97.7471],
+  ["Mount Bonnell", "Austin", 30.3208, -97.7733],
+  ["Pennybacker Bridge", "Austin", 30.3500, -97.7970],
+  // Cape Town: Wikipedia, or Wikidata where the article had none, checked 2026-11-13
+  ["Table Mountain", "Cape Town", -33.9622, 18.4099],
+  ["Lion's Head", "Cape Town", -33.9347, 18.3892],
+  ["Devil's Peak", "Cape Town", -33.9548, 18.4393],
+  ["Signal Hill", "Cape Town", -33.9178, 18.4028],
+  ["Cape Town Stadium", "Cape Town", -33.9035, 18.4112],
+  ["V&A Waterfront", "Cape Town", -33.9031, 18.4228],
+  ["Zeitz MOCAA", "Cape Town", -33.9083, 18.4228],
+  ["Portside Tower", "Cape Town", -33.9167, 18.4219],
+  ["Castle of Good Hope", "Cape Town", -33.9259, 18.4277],
+  ["Robben Island", "Cape Town", -33.8050, 18.3700],
+  ["Rhodes Memorial", "Cape Town", -33.9524, 18.4591],
+  ["Kirstenbosch Garden", "Cape Town", -33.9875, 18.4325],
+  ["Chapman's Peak", "Cape Town", -34.0872, 18.3606],
+  ["Cape Point", "Cape Town", -34.3572, 18.4975],
+  ["Space Needle", "Seattle", 47.6205, -122.3493],
+  ["Columbia Center", "Seattle", 47.6045, -122.3306],
+  ["Mount Rainier", "Seattle", 46.8523, -121.7603],
+  ["Golden Gate Bridge", "San Francisco", 37.8199, -122.4783],
+  ["Salesforce Tower", "San Francisco", 37.7897, -122.3972],
+  ["Empire State Building", "New York", 40.7484, -73.9857],
+  ["One World Trade Center", "New York", 40.7127, -74.0134],
+  ["Statue of Liberty", "New York", 40.6892, -74.0445],
+  ["Willis Tower", "Chicago", 41.8789, -87.6359],
+  ["CN Tower", "Toronto", 43.6426, -79.3871],
+  ["Big Ben", "London", 51.5007, -0.1246],
+  ["Eiffel Tower", "Paris", 48.8584, 2.2945],
+  ["Tokyo Tower", "Tokyo", 35.6586, 139.7454],
+  ["Tokyo Skytree", "Tokyo", 35.7101, 139.8107],
+  ["Burj Khalifa", "Dubai", 25.1972, 55.2744],
+  ["Sydney Opera House", "Sydney", -33.8568, 151.2153],
+];
+const SKYLINE_RADIUS_KM = 40;   // "What's that?" only labels places you could plausibly see
+const LENS_LONG_SIDE_FOV = 69;  // ASSUMPTION: iPhone main camera, long side of the sensor (26 mm equiv.)
+
+const $ = id => document.getElementById(id);
+const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+let me = null, heading = null, offset = 0, mode = "sky", target = null;
+
+// Great-circle distance (km) and initial bearing (° clockwise from true north).
+function distanceKm(a, b) {
+  const dLat = rad(b[0] - a[0]), dLon = rad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+  const y = Math.sin(rad(b[1] - a[1])) * Math.cos(rad(b[0]));
+  const x = Math.cos(rad(a[0])) * Math.sin(rad(b[0])) - Math.sin(rad(a[0])) * Math.cos(rad(b[0])) * Math.cos(rad(b[1] - a[1]));
+  return (deg(Math.atan2(y, x)) + 360) % 360;
+}
+const fmtKm = km => km < 1 ? Math.round(km * 1000) + " m" : km < 100 ? km.toFixed(1) + " km" : Math.round(km).toLocaleString() + " km";
+const angleDiff = (to, from) => ((to - from + 540) % 360) - 180; // −180..180, positive = to the right
+
+// Horizontal field of view actually visible on screen. The camera image is wider than the
+// screen in portrait, so "cover" crops its sides; only the middle slice is visible.
+function visibleFovDeg() {
+  const v = $("cam");
+  if (!v.videoWidth) return 50; // no camera: rough guess
+  const halfLong = Math.tan(rad(LENS_LONG_SIDE_FOV / 2));
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const halfW = vw < vh ? halfLong * vw / vh : halfLong;           // stream's horizontal half-width
+  const crop = Math.min(1, (innerWidth / innerHeight) / (vw / vh));  // fraction of width shown
+  return 2 * deg(Math.atan(halfW * crop));
+}
+
+// Places sorted nearest first, with distance and bearing from me.
+function places() {
+  return LANDMARKS.map(([name, city, lat, lon], i) => ({
+    i, name, city, km: distanceKm(me, [lat, lon]), brg: bearing(me, [lat, lon]),
+  })).sort((a, b) => a.km - b.km);
+}
+
+function fillPicker(list) {
+  const sel = $("pick"), keep = target;
+  sel.innerHTML = "";
+  list.forEach(p => sel.add(new Option(`${p.name}, ${p.city} · ${fmtKm(p.km)}`, p.i)));
+  target = keep ?? list[0].i;
+  sel.value = target;
+}
+$("pick").onchange = () => { target = +$("pick").value; update(); };
+
+function setMode(m) {
+  mode = m;
+  $("mSky").classList.toggle("on", m === "sky");
+  $("mFind").classList.toggle("on", m === "find");
+  $("pick").hidden = m !== "find";
+  update();
+}
+$("mSky").onclick = () => setMode("sky");
+$("mFind").onclick = () => setMode("find");
+
+let lastPickerFill = 0;
+function update() {
+  if (!me) return;
+  const list = places();
+  if (Date.now() - lastPickerFill > 10000) { fillPicker(list); lastPickerFill = Date.now(); }
+  if (heading == null) { $("hint").textContent = "Waiting for compass…"; return; }
+
+  const h = (heading + offset + 360) % 360;
+  const fov = visibleFovDeg(), halfTan = Math.tan(rad(fov / 2));
+  $("head").textContent = Math.round(h) + "°";
+  $("fov").textContent = Math.round(fov);
+
+  // Which places to label: everything nearby in Skyline mode, only the target in Find mode.
+  const candidates = mode === "sky" ? list.filter(p => p.km <= SKYLINE_RADIUS_KM)
+                                    : list.filter(p => p.i === target);
+  const inView = candidates
+    .map(p => ({ ...p, d: angleDiff(p.brg, h) }))
+    .filter(p => Math.abs(p.d) < fov / 2)
+    // A real lens maps angle to screen position by tangent, not linearly.
+    .map(p => ({ ...p, x: innerWidth / 2 * (1 + Math.tan(rad(p.d)) / halfTan) }))
+    .sort((a, b) => a.x - b.x);
+
+  // Stack labels in rows so they don't overlap; farther places sit higher.
+  const rows = [], halfBox = 95, rowH = 60, baseY = innerHeight * 0.42, stemEnd = baseY + 110;
+  inView.sort((a, b) => a.km - b.km).forEach(p => {
+    p.boxX = Math.min(Math.max(p.x, halfBox + 4), innerWidth - halfBox - 4); // keep the box on screen
+    let r = 0;
+    while (rows[r] && rows[r].some(x => Math.abs(x - p.boxX) < halfBox * 2)) r++;
+    (rows[r] = rows[r] || []).push(p.boxX);
+    p.row = r;
+  });
+  // Lower rows draw on top, so stems from higher labels pass behind them instead of through them.
+  $("labels").innerHTML = inView.map(p => {
+    const top = baseY - p.row * rowH, locked = Math.abs(p.d) < 2 ? "locked" : "";
+    return `
+    <div class="stem ${locked}" style="left:${p.x}px; top:${top + 40}px; height:${stemEnd - top - 40}px; z-index:${10 - p.row}"></div>
+    <div class="tag ${locked}" style="left:${p.boxX}px; top:${top}px; z-index:${20 - p.row}">
+      ${p.name}<small>${fmtKm(p.km)}</small>
+    </div>`;
+  }).join("");
+
+  if (mode === "sky") {
+    $("f1").innerHTML = `In view <b>${inView.length}</b> of ${candidates.length} nearby`;
+    $("arrow").hidden = true;
+    $("hint").textContent = candidates.length === 0 ? `No landmarks within ${SKYLINE_RADIUS_KM} km yet`
+      : inView.length ? "" : "Pan slowly to find landmarks";
+  } else {
+    const p = list.find(p => p.i === target), d = angleDiff(p.brg, h);
+    $("f1").innerHTML = `Distance <b>${fmtKm(p.km)}</b>`;
+    $("arrow").hidden = Math.abs(d) < fov / 2;
+    $("arrow").style.transform = `rotate(${d}deg)`;
+    $("hint").textContent = Math.abs(d) < 2 ? "Straight ahead" : Math.abs(d) < fov / 2 ? "In view"
+      : `Turn ${d > 0 ? "right" : "left"} ${Math.round(Math.abs(d))}°`;
+  }
+}
+
+$("minus").onclick = () => { offset--; $("off").textContent = offset + "°"; update(); };
+$("plus").onclick = () => { offset++; $("off").textContent = offset + "°"; update(); };
+addEventListener("resize", update);
+
+$("go").onclick = async () => {
+  try {
+    if (!window.isSecureContext) throw new Error("This page must be opened over https:// for location and compass to work.");
+    // iOS asks for motion permission only from a button tap.
+    if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
+      if (await DeviceOrientationEvent.requestPermission() !== "granted") throw new Error("Motion & orientation access was declined. Reload the page and tap Allow.");
+    }
+    addEventListener("deviceorientation", e => {
+      if (e.webkitCompassHeading != null) {
+        heading = e.webkitCompassHeading;
+        $("cacc").textContent = Math.round(e.webkitCompassAccuracy);
+      } else if (e.absolute && e.alpha != null) {
+        heading = 360 - e.alpha; // non-iOS fallback
+      }
+      update();
+    });
+    navigator.geolocation.watchPosition(p => {
+      me = [p.coords.latitude, p.coords.longitude];
+      $("gps").textContent = Math.round(p.coords.accuracy);
+      update();
+    }, e => { $("hint").textContent = "Location unavailable: " + e.message; }, { enableHighAccuracy: true });
+    // Camera is a nice-to-have; labels still work without it.
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+      .then(s => { $("cam").srcObject = s; }).catch(() => {});
+    $("start").hidden = true;
+  } catch (e) {
+    $("err").textContent = e.message;
+  }
+};
+</script>
+</body>
+</html>
